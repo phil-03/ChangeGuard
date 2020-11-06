@@ -1,4 +1,7 @@
 #!/usr/bin/python3
+
+#TODO maybe incorporate Windows Event Log or Linux Last command
+#TODO this script does not currently address empty directories.  
 import os
 import argparse
 import hashlib
@@ -7,6 +10,7 @@ import glob
 from collections import OrderedDict
 import time
 import datetime
+from getpass import getuser 
 
 
 def Get_File_Hash(path, object_type, verbosity): #retrieve the hash for either file or directory
@@ -39,18 +43,18 @@ def Get_File_Hash(path, object_type, verbosity): #retrieve the hash for either f
             return hash_file
         
         except:
-            f.close()
+            print("Failed to open file: {}".format(path))
             return "Cannot open file"
 
 def Get_Dir_Hashes(path, object_type, verbosity):
 
     if os.path.exists(path) != True:
-        #TODO put in guard actions here just in case
+       
         print("Modification detected, directory to guard has been deleted.  Initating guard actions...")
         return "GUARD"
        
     dir_count = 0 #needed to give directory names a unique place in dict, otherwise could create or remove empty directories without being noticed
-
+    unreadable_files = -1
     
     sha1 = hashlib.sha1()
 
@@ -58,26 +62,29 @@ def Get_Dir_Hashes(path, object_type, verbosity):
         
 
         dict_of_hashes = OrderedDict()
-        try:
-            for filename in glob.iglob(path + '**/**', recursive=True):
-                if os.path.isfile(filename) == True: # not sure why, always starts with initial directory path, which is not a file
-                    
-                    hash_file = Get_File_Hash(filename, "file", verbosity)
-                    dict_of_hashes.update({'{}'.format(hash_file): '{}'.format(filename)})
+        # try:
+        for filename in glob.iglob(path + '**/**', recursive=True):
+            if os.path.isfile(filename) == True: # not sure why, always starts with initial directory path, which is not a file
+                
+                hash_file = Get_File_Hash(filename, "file", verbosity)
+                if hash_file == "Cannot open file":
+                    dict_of_hashes.update({'{}'.format(unreadable_files): '{}'.format(filename)})
+                    unreadable_files += -1
+                dict_of_hashes.update({'{}'.format(hash_file): '{}'.format(filename)})
 
-                else:
-                   dict_of_hashes.update({'{}'.format(dir_count): '{}'.format(filename)})
-                   dir_count =+ 1
-                    
 
-            return dict_of_hashes
-
-        except:
-            print("Error hashing files inside {0}.  Make sure there is a trailing slash on {0}!!".format(path))
-            sys.exit()
+            else:
+                dict_of_hashes.update({'{}'.format(dir_count): '{}'.format(filename)})
+                dir_count =+ 1
+                
+        return dict_of_hashes
+            
 
 def Guard_Check_File(path, object_type, previous_hash): # check the previous file hash, and see if the watched file has been modified
     new_hash = Get_File_Hash(path, object_type, False)
+
+    if new_hash == "GUARD": #check if file deleted essentially
+        return False, "GUARD", path
     
     if new_hash == previous_hash:
         return True, new_hash, path #no modification has occurred
@@ -93,6 +100,8 @@ def Guard_Check_Directory(path, object_type, previous_dict):# check the previous
     count_new = 0
     new_dict = Get_Dir_Hashes(path, object_type, False)
 
+    if new_dict == "GUARD": #check if original dir deleted 
+        return False, path, "GUARD"
 
     value = True #True means no modification has happened
     modified_file = ""
@@ -153,28 +162,39 @@ def Guard_Check_Directory(path, object_type, previous_dict):# check the previous
 def Guard_Log(path, output, modified_files):
 
     with open(output, 'a') as f: #open and write to log file
-        print("{0} modification detected at approximately {1}.  See {2}.".format(path, datetime.datetime.now(), modified_files), file=f)
+        print("{0} modification detected at approximately {1}.  Modication triggered by user: {2}.".format(path, datetime.datetime.now(), modified_files), file=f)
 
-def Guard_Armed(guard_action, output, modified_files):
-    pass
+def Guard_Armed(path, guard_action, output, modified_files, command):
+    with open(output, 'a') as f: #open and write to log file
+        print("{0} modification detected at approximately {1}.  Modication triggered by user: {2}. Initating aggressive guard actions.".format(path, datetime.datetime.now(), modified_files), file=f)
 
+    time.sleep(5)
+    os.system(command)
+    
+    return
 def main(path, object_type, guard_action, output, verbosity):
+    
+
     #determine OS
     operating_system = os.name
     if operating_system == "nt":
-        if "\\\\" not in path:
-            path = path.replace("\\", "\\\\")
-
+        command = "shutdown /f /s /t 1"
         if verbosity == True:
             print("Operating System detected as Windows.")
 
     elif operating_system == "posix":
+        command = "systemctl poweroff"
         if verbosity == True:
             print("Operating System detected as Linux or Mac.")
-
+           
     else:
         print("No valid OS detected - exiting.")
         sys.exit()
+
+    if guard_action == "armed":
+        print("Are you sure you wish to arm ChangeGuard?  This will shut down your system as a defensive measure whenever a change is detected.")
+        input("Press any key to continue, or abort the script now if you don't wish to do this...")
+        
 
     if object_type == "dir":
         #make sure path exists
@@ -188,16 +208,26 @@ def main(path, object_type, guard_action, output, verbosity):
             sys.exit()
 
         orig_hash_dict = Get_Dir_Hashes(path, object_type, verbosity)
-        if orig_hash_dict == "GUARD":
-            if guard_action == "log":
-                Guard_Log(path, output, "Main directory to guard deleted.")
+        
         while True: # keep the script running indefinitely, runs once per 15 seconds
             mod_value, modified_file_list, new_dict = Guard_Check_Directory(path, object_type, orig_hash_dict)
-            time.sleep(15)
+            time.sleep(10)
             if mod_value == False:
-                print("{0} directory modified at {1}. Taking {2} action...".format(path, modified_file_list, guard_action))
-                if guard_action == "log":
-                    Guard_Log(path, output, modified_file_list)
+                if new_dict == "GUARD":
+                    if guard_action == "log":
+                        Guard_Log(path, output, "Main directory to guard ({}) deleted.".format(path))
+                        sys.exit()
+                    
+                    elif guard_action == "armed":
+                        Guard_Armed(path, guard_action, output, "Main directory to guard ({}) deleted.".format(path), command)
+                else:
+
+                    print("{0} directory modified at {1}. Taking {2} action...".format(path, modified_file_list, guard_action))
+                    if guard_action == "log":
+                        Guard_Log(path, output, modified_file_list)
+
+                    elif guard_action == "armed":
+                        Guard_Armed(path, guard_action, output, modified_file_list, command)
 
                 
                 orig_hash_dict = new_dict
@@ -215,29 +245,27 @@ def main(path, object_type, guard_action, output, verbosity):
             sys.exit()
 
         orig_file_hash = Get_File_Hash(path, object_type, verbosity)
-        if orig_file_hash == "GUARD":
-            if guard_action == "log":
-                Guard_Log(path, output, "Main file to guard deleted.")
         
         while True: # keep the script running indefinitely, runs once per 15 seconds
             mod_value, new_hash, modified_file = Guard_Check_File(path, object_type, orig_file_hash)
-            time.sleep(15)
-            if mod_value == False:
-                print("{0} modification detected! Taking {1} action...".format(path, guard_action))
-                if guard_action == "log":
-                    Guard_Log(path, output, modified_file)
+            time.sleep(10)
+            if mod_value == False: #edge case if file to guard has been deleted
+                if new_hash == "GUARD":
+                    if guard_action == "log":
+                        Guard_Log(path, output, "Main file to guard ({}) deleted.".format(path))
+                        sys.exit()
+
+                    elif guard_action == "armed":
+                        Guard_Armed(path, guard_action, output, "Main file to guard ({}) deleted.".format(path), command)
+                else:
+                    print("{0} modification detected! Taking {1} action...".format(path, guard_action))
+                    if guard_action == "log":
+                        Guard_Log(path, output, modified_file)
+                    elif guard_action == "armed":
+                        Guard_Armed(path, guard_action, output, modified_file, command)
+                    
                 orig_file_hash = new_hash
-
-        
-        
-
-
-    
-
-
-
-
-    
+ 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Guard a file or a directory from changes, and either log or take other actions if a change is recorded.")
@@ -259,9 +287,6 @@ if __name__ == '__main__':
         print("Please provide a path to the file/directory you want to guard.")
         parser.print_help()
         sys.exit()
-
-    if str(args.type) == "":
-        print("Please provide a type of object to guard: your options are file or dir.")
 
     if str(args.type) != "file" and str(args.type) != "dir":
         print("Please provide a type of object to guard: your options are file or dir.")
